@@ -62,11 +62,12 @@ GitHub-Actions-Revision/
 
 File: `namespace.yml`
 
+```yml
     apiVersion: v1
     kind: Namespace
     metadata:
       name: devboard
-
+```
 Connection: All application resources specify `namespace: devboard`.
 This allows their names to be resolved within the same namespace.
 
@@ -76,6 +77,7 @@ No. You do not need a separate frontend `pod.yml` for this deployment.
 
 Your `frontend-deployment.yml` already defines a Pod template:
 
+```yml
     spec:
       replicas: 5
       selector:
@@ -89,7 +91,7 @@ Your `frontend-deployment.yml` already defines a Pod template:
           containers:
             - name: devboard-frontend
               image: anandkumarprajap/devboard-frontend:latest
-
+```
 The Deployment creates and maintains five Pods through a ReplicaSet. A
 standalone Pod is useful for temporary debugging or simple experiments,
 but it is not necessary for this application.
@@ -98,6 +100,7 @@ but it is not necessary for this application.
 
 File: `frontend-deployment.yml`
 
+```yml
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -121,7 +124,7 @@ File: `frontend-deployment.yml`
               ports:
                 - name: http
                   containerPort: 4173
-
+```
 Important connection: `spec.selector.matchLabels.app` must match
 `spec.template.metadata.labels.app`. The Service also selects this same
 label.
@@ -130,6 +133,7 @@ label.
 
 File: `frontend-service.yml`
 
+```yml
     apiVersion: v1
     kind: Service
     metadata:
@@ -145,7 +149,7 @@ File: `frontend-service.yml`
           port: 8080
           targetPort: 4173
           nodePort: 30080
-
+```
 Your original YAML contained `type: NodePort` twice. Keep it only once.
 
   Setting              Purpose
@@ -161,7 +165,7 @@ listen on `8080`. It forwards traffic to container port `4173`.
 ### 1.6 Correct the Secret
 
 File: `secrets.yml`
-
+```yml
     apiVersion: v1
     kind: Secret
     metadata:
@@ -171,7 +175,7 @@ File: `secrets.yml`
     stringData:
       POSTGRES_PASSWORD: "devboard"
       POSTGRES_DB: "devboard"
-
+```
 Using `stringData` allows you to provide readable strings; Kubernetes
 converts them into the Secret's stored data format.
 
@@ -186,7 +190,7 @@ encryption-at-rest configuration for stronger protection.
 ### 1.7 Correct the ConfigMap
 
 File: `configMap.yml`
-
+```yml
     apiVersion: v1
     kind: ConfigMap
     metadata:
@@ -194,7 +198,7 @@ File: `configMap.yml`
       namespace: devboard
     data:
       POSTGRES_USER: "devboard"
-
+```
 Connection: The backend and PostgreSQL Deployment read `POSTGRES_USER`
 from this ConfigMap.
 
@@ -204,7 +208,7 @@ File: `postgres-init.yml`
 
 Keep your existing SQL schema and seed statements, but use this YAML
 structure:
-
+```yml
     apiVersion: v1
     kind: ConfigMap
     metadata:
@@ -292,7 +296,7 @@ structure:
           'projects_id_seq',
           (SELECT MAX(id) FROM projects)
         );
-
+```
 This retains your two tables, indexes, update trigger, sample projects,
 and task records. Keep the complete SQL in the actual file.
 
@@ -304,7 +308,7 @@ time the Pod restarts.
 ### 1.9 Correct the PostgreSQL Deployment
 
 File: `postgres-deployment.yml`
-
+```yml
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -352,7 +356,7 @@ File: `postgres-deployment.yml`
             - name: init
               configMap:
                 name: postgres-init
-
+```
 This fixes the volume indentation and ensures that the `init` volume and
 its mount use the same name.
 
@@ -364,7 +368,7 @@ a more durable deployment, add a PersistentVolumeClaim and mount it at
 ### 1.10 Correct the PostgreSQL Service
 
 File: `postgres-service.yml`
-
+```yml
     apiVersion: v1
     kind: Service
     metadata:
@@ -379,14 +383,14 @@ File: `postgres-service.yml`
           protocol: TCP
           port: 5432
           targetPort: 5432
-
+```
 The Service name `postgres` is important: it is the hostname used in
 your backend's PostgreSQL connection string.
 
 ### 1.11 Correct the backend Deployment
 
 File: `backend-deployment.yml`
-
+```yml
     apiVersion: apps/v1
     kind: Deployment
     metadata:
@@ -430,7 +434,7 @@ File: `backend-deployment.yml`
                   value: "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/$(POSTGRES_DB)?sslmode=disable"
                 - name: PORT
                   value: "8080"
-
+```
 Kubernetes expands the earlier environment variables in `POSTGRES_URL`.
 The backend application must actually read `POSTGRES_URL` and listen on
 port `8080` for this configuration to work.
@@ -438,7 +442,7 @@ port `8080` for this configuration to work.
 ### 1.12 Correct the backend Service
 
 File: `backend-service.yml`
-
+```yml
     apiVersion: v1
     kind: Service
     metadata:
@@ -453,7 +457,7 @@ File: `backend-service.yml`
           protocol: TCP
           port: 8080
           targetPort: 8080
-
+```
 The backend's stable internal address is:
 
 `http://backend:8080`
@@ -464,7 +468,7 @@ not directly in a user's browser outside the cluster.
 ### 1.13 Correct the Kind cluster configuration
 
 File: `kind-config.yml`
-
+```yml
     kind: Cluster
     apiVersion: kind.x-k8s.io/v1alpha4
     name: tws-cluster
@@ -482,7 +486,7 @@ File: `kind-config.yml`
 
       - role: worker
         image: kindest/node:v1.35.0
-
+```
 Your cluster has one control-plane node and two worker nodes. The port
 mapping connects your computer's port `8080` to port `30080` on the Kind
 control-plane node.
