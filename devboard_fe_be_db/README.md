@@ -1002,3 +1002,697 @@ These notes provide a foundation for your DevBoard Kubernetes lab.
 Before treating the deployment as production-ready, add database
 persistence, stronger Secret management, health probes, resource
 requests/limits, and appropriate network and access controls.
+
+
+
+# Explain 
+
+> **Project setup covered here:** Kind cluster `tws-cluster`; namespace `devboard`; PostgreSQL `postgres:16-alpine`; Go backend with 2 replicas on port `8080`; frontend with 5 replicas on port `4173`; frontend NodePort `30080`, mapped to host port `8080`.
+
+## 1. Project structure
+
+```text
+GitHub-Actions-Revision/
+└── k8s/
+    ├── kind-config.yml
+    ├── namespace.yml
+    ├── configMap.yml
+    ├── secrets.yml
+    ├── postgres-init.yml
+    ├── postgres-deployment.yml
+    ├── postgres-service.yml
+    ├── backend-deployment.yml
+    ├── backend-service.yml
+    ├── frontend-deployment.yml
+    ├── frontend-service.yml
+    └── README.md
+```
+
+| File | Responsibility |
+|---|---|
+| `kind-config.yml` | Configures the local Kind nodes and host-to-node port mapping. |
+| `namespace.yml` | Creates the `devboard` namespace. |
+| `configMap.yml` | Holds non-sensitive database configuration. |
+| `secrets.yml` | Holds database credentials. |
+| `postgres-init.yml` | Provides SQL scripts for initial database setup. |
+| `postgres-deployment.yml` | Runs the PostgreSQL container. |
+| `postgres-service.yml` | Gives PostgreSQL stable in-cluster DNS: `postgres`. |
+| `backend-deployment.yml` | Runs the Go API and supplies its database connection settings. |
+| `backend-service.yml` | Gives the API stable in-cluster DNS: `backend`. |
+| `frontend-deployment.yml` | Runs five frontend replicas. |
+| `frontend-service.yml` | Exposes the frontend using NodePort `30080`. |
+
+## 2. Important Kubernetes YAML fields
+
+Most Kubernetes resource manifests share these fields:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example
+  namespace: devboard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+        - name: example
+          image: example-image:latest
+```
+
+- `apiVersion`: Kubernetes API group/version used for the resource.
+- `kind`: resource type, such as `Deployment`, `Service`, `ConfigMap`, or `Secret`.
+- `metadata.name`: resource name.
+- `metadata.namespace`: namespace in which the resource lives. If omitted, `kubectl` normally uses the `default` namespace.
+- `spec.replicas`: desired number of Pod replicas for a Deployment.
+- `selector.matchLabels`: tells the Deployment which Pods it manages.
+- `template.metadata.labels`: labels applied to Pods. These must match the Deployment selector.
+- `containers.image`: container image to run.
+- `ports.containerPort`: documents the port the application listens on inside the container; it does not by itself expose the app outside the cluster.
+
+## 3. `kind-config.yml` — create the local cluster configuration
+
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: tws-cluster
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+  - role: worker
+  - role: worker
+```
+
+### What the code means
+
+- `kind: Cluster`: this file describes a Kind cluster.
+- `apiVersion`: the Kind configuration schema version.
+- `name: tws-cluster`: gives the cluster its name.
+- `role: control-plane`: the node that runs the Kubernetes control-plane components.
+- `role: worker`: adds two worker nodes where application Pods can be scheduled.
+- `extraPortMappings`: forwards a port from the computer running Kind to a port on the Kind node.
+- `containerPort: 30080`: the NodePort on the Kind node.
+- `hostPort: 8080`: the port you use from your local browser.
+- `protocol: TCP`: uses TCP networking.
+
+**Create the cluster:**
+
+```bash
+cd GitHub-Actions-Revision/k8s
+kind create cluster --config kind-config.yml
+kubectl cluster-info --context kind-tws-cluster
+kubectl get nodes -o wide
+```
+
+`kind-config.yml` is not applied with `kubectl apply`. Kind reads it when creating the cluster. If the cluster already exists, editing this file does not automatically rebuild or reconfigure it.
+
+## 4. `namespace.yml` — isolate project resources
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devboard
+```
+
+- `apiVersion: v1`: core Kubernetes API.
+- `kind: Namespace`: creates a logical boundary for resources.
+- `metadata.name: devboard`: names the namespace.
+
+Create it and set a convenient default namespace for the current context:
+
+```bash
+kubectl apply -f namespace.yml
+kubectl config set-context --current --namespace=devboard
+kubectl get namespace devboard
+```
+
+The namespace helps keep DevBoard resources grouped together. It is not a security boundary by itself.
+
+## 5. `configMap.yml` — non-sensitive configuration
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devboard-configmap
+  namespace: devboard
+data:
+  POSTGRES_USER: "devboard"
+```
+
+- `kind: ConfigMap`: stores ordinary configuration values.
+- `metadata.name`: must match the name referenced by the Deployments.
+- `data`: contains string key/value pairs.
+- `POSTGRES_USER`: database username supplied to PostgreSQL.
+
+Apply and inspect:
+
+```bash
+kubectl apply -f configMap.yml
+kubectl get configmap devboard-configmap -n devboard
+kubectl describe configmap devboard-configmap -n devboard
+```
+
+Do not store passwords, API keys, or other sensitive values in a ConfigMap.
+
+## 6. `secrets.yml` — database credentials
+
+A manifest using `stringData` can be written like this:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: devboard-secrets
+  namespace: devboard
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "devboard"
+  POSTGRES_DB: "devboard"
+```
+
+- `kind: Secret`: stores sensitive configuration for use by Pods.
+- `type: Opaque`: a general-purpose Secret type. The capitalization matters.
+- `stringData`: lets you enter plain strings; Kubernetes converts them for storage.
+- `POSTGRES_PASSWORD`: password passed to PostgreSQL.
+- `POSTGRES_DB`: database name created by the PostgreSQL image on first initialization.
+
+Apply and verify the Secret without printing its values:
+
+```bash
+kubectl apply -f secrets.yml
+kubectl get secret devboard-secrets -n devboard
+```
+
+**Security note:** Kubernetes Secret values are not automatically encrypted just because they are stored in a Secret. This example password is suitable only for a disposable learning lab. Use a strong credential and appropriate cluster access controls for real deployments. Avoid committing real credentials to Git.
+
+## 7. `postgres-init.yml` — initial SQL schema
+
+The SQL initialization file is supplied to the PostgreSQL container using a ConfigMap. Example:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: devboard
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS projects (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id SERIAL PRIMARY KEY,
+      project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'todo',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+```
+
+- `kind: ConfigMap`: packages the SQL file as configuration data.
+- `metadata.name: postgres-init`: this exact name must match the ConfigMap volume reference in `postgres-deployment.yml`.
+- `data.init.sql`: creates a file named `init.sql` inside the mounted directory.
+- `CREATE TABLE IF NOT EXISTS`: creates a table only if it does not already exist.
+- `projects`: stores project records.
+- `tasks`: stores tasks and can link each task to a project using `project_id`.
+- `ON DELETE CASCADE`: removes related tasks when their referenced project is deleted.
+
+Apply and inspect:
+
+```bash
+kubectl apply -f postgres-init.yml
+kubectl get configmap postgres-init -n devboard
+```
+
+**Important:** the official PostgreSQL container runs scripts in `/docker-entrypoint-initdb.d` only when initializing an empty database data directory. Updating this ConfigMap later does not automatically rerun the SQL against an already-initialized database. If tables are missing, check the PostgreSQL logs and database state before deciding how to reinitialize it; deleting database storage can permanently delete data.
+
+## 8. `postgres-deployment.yml` — run PostgreSQL
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: devboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: devboard-postgres
+  template:
+    metadata:
+      labels:
+        app: devboard-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: devboard-configmap
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: devboard-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: devboard-secrets
+                  key: POSTGRES_DB
+          volumeMounts:
+            - name: postgres-init-volume
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: postgres-init-volume
+          configMap:
+            name: postgres-init
+```
+
+### Key sections
+
+- `kind: Deployment`: Kubernetes keeps the requested number of PostgreSQL Pods running.
+- `replicas: 1`: requests one database Pod. A single replica is suitable for a lab, not a highly available production database.
+- `selector.matchLabels` and `template.metadata.labels`: must match so the Deployment manages the intended Pod.
+- `image: postgres:16-alpine`: uses PostgreSQL 16 on Alpine Linux.
+- `containerPort: 5432`: PostgreSQL's default listening port.
+- `valueFrom.configMapKeyRef`: loads the username from `devboard-configmap`.
+- `valueFrom.secretKeyRef`: loads the password and database name from `devboard-secrets`.
+- `volumeMounts`: makes the SQL initialization files available inside the container.
+- `mountPath: /docker-entrypoint-initdb.d`: special directory scanned by the official PostgreSQL image during first-time initialization.
+- `readOnly: true`: the container can read, but not modify, the mounted initialization files.
+- `volumes.configMap.name: postgres-init`: must match the ConfigMap name in `postgres-init.yml`.
+
+Apply and check:
+
+```bash
+kubectl apply -f postgres-deployment.yml
+kubectl get pods -n devboard -o wide
+kubectl logs deployment/postgres-deployment -n devboard
+```
+
+**Data persistence:** this example does not define a PersistentVolumeClaim. Without persistent storage, data can be lost when the Pod is replaced. For anything beyond a temporary lab, configure persistent storage and a database backup plan.
+
+## 9. `postgres-service.yml` — stable database DNS
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: devboard
+spec:
+  selector:
+    app: devboard-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+```
+
+- `kind: Service`: creates a stable network endpoint for the matching Pods.
+- `metadata.name: postgres`: provides the in-cluster DNS name `postgres`.
+- `selector`: must match the database Pod label `app: devboard-postgres`.
+- `port: 5432`: Service port clients use.
+- `targetPort: 5432`: port on the PostgreSQL container.
+- `type: ClusterIP`: exposes the Service inside the cluster, not directly to your laptop.
+
+Other Pods in the same namespace can connect to `postgres:5432`. The backend's database connection uses the Service name, not a temporary Pod IP.
+
+## 10. `backend-deployment.yml` — run the Go API
+
+The backend Deployment uses two replicas and obtains its database connection settings from Kubernetes configuration. Example:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deployment
+  namespace: devboard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devboard-backend
+  template:
+    metadata:
+      labels:
+        app: devboard-backend
+    spec:
+      containers:
+        - name: backend
+          image: anandkumarprajap/devboard-backend:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POSTGRES_URL
+              value: "postgres://devboard:devboard@postgres:5432/devboard?sslmode=disable"
+```
+
+### Key sections
+
+- `replicas: 2`: requests two backend Pods for basic replica capacity.
+- `image`: the container image for the Go API.
+- `containerPort: 8080`: the API's container port.
+- `POSTGRES_URL`: connection string containing the database username, password, hostname, port, database name, and SSL mode.
+- `postgres`: the hostname resolves through the PostgreSQL Service inside the cluster.
+
+The example connection string matches the sample lab credentials above. If you change the username, password, or database name, update the backend connection configuration too. For a safer setup, construct the connection string from Secret-backed environment variables rather than embedding a password in the Deployment YAML.
+
+Apply and check:
+
+```bash
+kubectl apply -f backend-deployment.yml
+kubectl get pods -n devboard -l app=devboard-backend -o wide
+kubectl logs deployment/backend-deployment -n devboard
+```
+
+## 11. `backend-service.yml` — stable backend DNS
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: devboard
+spec:
+  selector:
+    app: devboard-backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+```
+
+- `metadata.name: backend`: creates the stable in-cluster hostname `backend`.
+- `selector`: matches the labels on backend Pods.
+- `port: 8080`: port other Pods use to reach the backend Service.
+- `targetPort: 8080`: port on the backend containers.
+- `ClusterIP`: makes the API available inside Kubernetes.
+
+The frontend container can reach `http://backend:8080` **from inside the cluster** if its requests are made by a server-side proxy. A browser running on your laptop cannot normally resolve the Kubernetes-only hostname `backend`. If frontend JavaScript calls `http://backend:8080` directly from the browser, configure an accessible API URL or route requests through a frontend web-server reverse proxy.
+
+## 12. `frontend-deployment.yml` — run five frontend replicas
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-deployment
+  namespace: devboard
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: devboard-frontend
+  template:
+    metadata:
+      labels:
+        app: devboard-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: anandkumarprajap/devboard-frontend:latest
+          ports:
+            - containerPort: 4173
+```
+
+- `replicas: 5`: requests five frontend Pods.
+- `image`: the published DevBoard frontend image.
+- `containerPort: 4173`: the port the frontend server listens on in the container.
+- The Service selects the Pods using `app: devboard-frontend`.
+
+A Deployment manages the desired number of replicas and can replace Pods that fail. Five replicas do not automatically guarantee high availability; node capacity, readiness checks, and application behavior also matter.
+
+Apply and check:
+
+```bash
+kubectl apply -f frontend-deployment.yml
+kubectl get pods -n devboard -l app=devboard-frontend -o wide
+kubectl rollout status deployment/frontend-deployment -n devboard
+```
+
+## 13. `frontend-service.yml` — expose the frontend with NodePort
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: devboard
+spec:
+  type: NodePort
+  selector:
+    app: devboard-frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 4173
+      nodePort: 30080
+```
+
+- `type: NodePort`: exposes the Service on a port on each Kubernetes node.
+- `selector`: sends traffic to frontend Pods with the matching label.
+- `port: 8080`: Service port inside the cluster.
+- `targetPort: 4173`: frontend container port.
+- `nodePort: 30080`: port exposed on the Kind node. The standard Kubernetes NodePort range is usually `30000–32767`.
+- The Kind configuration maps local host port `8080` to node port `30080`.
+
+Open the frontend at:
+
+```text
+http://localhost:8080
+```
+
+This relies on the cluster being created with the `extraPortMappings` shown in `kind-config.yml` and the frontend Service being healthy.
+
+## 14. How the files connect
+
+```mermaid
+flowchart TD
+    A["kind-config.yml"] --> B["Kind cluster: tws-cluster"]
+    B --> C["namespace.yml: devboard"]
+    C --> D["ConfigMap: devboard-configmap"]
+    C --> E["Secret: devboard-secrets"]
+    C --> F["ConfigMap: postgres-init"]
+    D --> G["PostgreSQL Deployment"]
+    E --> G
+    F --> G
+    G --> H["PostgreSQL Pod :5432"]
+    H --> I["Service: postgres :5432"]
+    I --> J["Backend Deployment: 2 replicas"]
+    J --> K["Backend Pods :8080"]
+    K --> L["Service: backend :8080"]
+    L --> M["Frontend Pods :4173"]
+    M --> N["Frontend Service: 8080 / NodePort 30080"]
+    N --> O["Host browser: http://localhost:8080"]
+```
+
+The application request path is:
+
+1. Your browser requests `http://localhost:8080`.
+2. Kind forwards host port `8080` to node port `30080`.
+3. The frontend NodePort Service sends traffic to a frontend Pod on port `4173`.
+4. The frontend must send API requests to the backend using a valid in-cluster route (for example, a server-side proxy to `http://backend:8080`) or a browser-accessible API address.
+5. The backend connects to the database at `postgres:5432`.
+6. The PostgreSQL Service forwards traffic to the PostgreSQL Pod.
+
+### Port reference
+
+| Component | Port | Meaning |
+|---|---:|---|
+| Local computer | `8080` | Browser-facing host port |
+| Kind node | `30080` | NodePort reached through Kind's port mapping |
+| Frontend Service | `8080` | Kubernetes Service port |
+| Frontend container | `4173` | Frontend server port |
+| Backend Service/container | `8080` | Go API port |
+| PostgreSQL Service/container | `5432` | Database port |
+
+## 15. Apply manifests in order
+
+Run commands from the `k8s/` directory. Create the Kind cluster first; do not apply `kind-config.yml` with `kubectl`.
+
+```bash
+# 1. Create the cluster (skip if it already exists)
+kind create cluster --config kind-config.yml
+
+# 2. Create the namespace
+kubectl apply -f namespace.yml
+
+# 3. Create configuration and database initialization resources
+kubectl apply -f configMap.yml
+kubectl apply -f secrets.yml
+kubectl apply -f postgres-init.yml
+
+# 4. Create PostgreSQL and its Service
+kubectl apply -f postgres-deployment.yml
+kubectl apply -f postgres-service.yml
+
+# 5. Create backend and its Service
+kubectl apply -f backend-deployment.yml
+kubectl apply -f backend-service.yml
+
+# 6. Create frontend and its Service
+kubectl apply -f frontend-deployment.yml
+kubectl apply -f frontend-service.yml
+
+# 7. Check all resources
+kubectl get all -n devboard
+```
+
+You can also apply all resource manifests in the directory after the cluster exists and the files are correct:
+
+```bash
+kubectl apply -f .
+```
+
+Applying a directory does not guarantee readiness order. If you use it, still verify that PostgreSQL is ready before debugging backend database errors.
+
+## 16. Verification commands
+
+```bash
+# Cluster and nodes
+kind get clusters
+kubectl get nodes -o wide
+
+# All DevBoard resources
+kubectl get all -n devboard
+
+# Pods, labels, IP addresses and node placement
+kubectl get pods -n devboard -o wide --show-labels
+
+# Services and NodePort
+kubectl get services -n devboard
+
+# Deployments and rollout status
+kubectl get deployments -n devboard
+kubectl rollout status deployment/postgres-deployment -n devboard
+kubectl rollout status deployment/backend-deployment -n devboard
+kubectl rollout status deployment/frontend-deployment -n devboard
+
+# Logs
+kubectl logs deployment/postgres-deployment -n devboard
+kubectl logs deployment/backend-deployment -n devboard
+kubectl logs deployment/frontend-deployment -n devboard
+
+# Recent events
+kubectl get events -n devboard --sort-by=.metadata.creationTimestamp
+```
+
+Expected replica counts are one PostgreSQL Pod, two backend Pods, and five frontend Pods, provided the images can be pulled and all containers become healthy.
+
+## 17. Troubleshooting
+
+### Pods are `Pending`, `ImagePullBackOff`, or `CrashLoopBackOff`
+
+```bash
+kubectl describe pod <pod-name> -n devboard
+kubectl logs <pod-name> -n devboard
+kubectl logs <pod-name> -n devboard --previous
+kubectl get events -n devboard --sort-by=.metadata.creationTimestamp
+```
+
+Look for image-pull errors, missing configuration keys, invalid image names, failed probes, resource pressure, or application startup errors.
+
+### Service has no endpoints
+
+```bash
+kubectl get svc -n devboard
+kubectl get endpoints -n devboard
+kubectl get pods -n devboard --show-labels
+```
+
+A Service's `spec.selector` must match the Pod template labels. For example, the PostgreSQL Service selector `app: devboard-postgres` must match the labels on the PostgreSQL Pod.
+
+### Backend cannot connect to PostgreSQL
+
+```bash
+kubectl logs deployment/backend-deployment -n devboard
+kubectl logs deployment/postgres-deployment -n devboard
+kubectl get svc postgres -n devboard
+kubectl describe pod -l app=devboard-postgres -n devboard
+```
+
+Check that the database is ready, the hostname is `postgres`, port is `5432`, and username/password/database match the ConfigMap and Secret. Also verify that `postgres-init.yml` defines ConfigMap `postgres-init` and the Deployment mounts that same name. A name mismatch prevents the initialization ConfigMap from mounting.
+
+### Frontend loads but API requests fail
+
+Inspect the browser developer tools' Network tab and the frontend server configuration. Kubernetes DNS names such as `backend` resolve inside the cluster; they do not automatically resolve in a user's browser. Route API requests through a server-side reverse proxy or configure a browser-accessible API endpoint.
+
+### Frontend does not open on `localhost:8080`
+
+```bash
+kubectl get svc frontend-service -n devboard
+kubectl get pods -n devboard -l app=devboard-frontend -o wide
+docker ps
+```
+
+Confirm the Service uses NodePort `30080`, the container port is `4173`, the Kind cluster was created with host `8080` mapped to node `30080`, and the frontend Pods are ready.
+
+### SQL tables are missing
+
+Review the PostgreSQL logs and confirm the `postgres-init` ConfigMap is mounted at `/docker-entrypoint-initdb.d`. The official image runs initialization scripts only on the first initialization of an empty data directory. Changing the ConfigMap after the database has initialized does not rerun scripts automatically.
+
+## 18. Configuration corrections to check
+
+Before deploying, confirm these names and values are consistent across the files:
+
+- `namespace.yml` creates `devboard`; all application resources should use that namespace.
+- The ConfigMap name is `devboard-configmap`; its key is `POSTGRES_USER`.
+- The Secret name is `devboard-secrets`; its keys are `POSTGRES_PASSWORD` and `POSTGRES_DB`.
+- The initialization ConfigMap name is `postgres-init`; the PostgreSQL volume reference must use exactly the same name.
+- The PostgreSQL Service is named `postgres`, and the backend connection hostname must be `postgres`.
+- The backend Service is named `backend`; any server-side frontend proxy must use that Service name.
+- Backend labels and Service selector must match: `app: devboard-backend`.
+- Frontend labels and Service selector must match: `app: devboard-frontend`.
+- Frontend container port is `4173`; frontend NodePort is `30080`; Kind host mapping is `8080` to `30080`.
+- Avoid duplicate YAML keys such as two `type:` entries in one Service manifest. YAML should define each key only once.
+
+## 19. Clean up
+
+> **Warning:** deleting the cluster removes the Kubernetes resources in that Kind cluster. Database data may be lost if it is stored only in ephemeral Pod storage.
+
+```bash
+kind delete cluster --name tws-cluster
+```
+
+## Summary
+
+- **Kind** creates the local Kubernetes cluster and port mapping.
+- **Namespace** groups DevBoard resources.
+- **ConfigMap and Secret** supply configuration and credentials.
+- **PostgreSQL Deployment + Service** run the database and provide stable DNS.
+- **Backend Deployment + Service** run the Go API and provide stable DNS.
+- **Frontend Deployment + NodePort Service** run five frontend replicas and expose the web UI at `http://localhost:8080`.
+- **Labels and selectors** connect Services to the correct Pods.
+- **SQL initialization** happens on first initialization of an empty PostgreSQL data directory, not every time the Pod restarts.
+'''
+
+out = Path("/mnt/data/README.md")
+pypandoc.convert_text(readme, "md", format="md", outputfile=str(out), extra_args=["--standalone"])
+print(f"Created {out} ({out.stat().st_size} bytes)")
+
