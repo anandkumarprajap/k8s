@@ -703,54 +703,80 @@ Useful diagnostic commands:
 Replace `<pod-name>` with the actual Pod name returned by
 `kubectl get pods`.
 
-## Step 4 --- How Namespace, Deployment, Secret, ConfigMap, init data, Pods and Services connect
 
-The most important concept is that Kubernetes resources connect through
-references, selectors and DNS names --- not because their YAML files are
-physically linked together.
 
-### 4.1 Connection map
 
-Namespace: `devboard`
 
-Common namespace for all application resources
 
-ConfigMap
 
-`devboard-configmap`
+## 🛠️ Step 4: Component Connectivity Matrix
 
-POSTGRES_USER
+The core architecture of Kubernetes relies completely on **decoupled references, labels, selectors, and internal DNS names**—not physical file linking. Primitives declare dependencies dynamically at runtime.
 
-Secret
+### 4.1 Topology & Resource Ownership Map
 
-`devboard-secrets`
+All workloads reside securely inside an isolated operational boundary:
 
-POSTGRES_PASSWORD, POSTGRES_DB
+```mermaid
+graph TD
+    %% Core Styling
+    classDef ns fill:#f8f9fa,stroke:#343a40,stroke-width:2px,stroke-dasharray: 5 5;
+    classDef config fill:#fff3cd,stroke:#ffc107,stroke-width:1px;
+    classDef deploy fill:#cce5ff,stroke:#004085,stroke-width:1px;
+    classDef pod fill:#e2e3e5,stroke:#383d41,stroke-width:1px;
+    classDef svc fill:#d4edda,stroke:#155724,stroke-width:1px;
 
-Frontend
+    %% Namespace Boundary
+    subgraph Devboard_NS [☸️ Namespace: devboard]
+        
+        %% Config & Secret Layer
+        CM[📄 ConfigMap: devboard-configmap<br/>• POSTGRES_USER] --- CM_Inj(Env Injection)
+        SEC[🔏 Secret: devboard-secrets<br/>• POSTGRES_PASSWORD<br/>• POSTGRES_DB] --- SEC_Inj(Env Injection)
 
-Deployment
+        %% Services Network Layer
+        Svc_FE[🔌 Service: frontend-svc] -.->|Routes to| Pod_FE
+        Svc_BE[🔌 Service: backend-svc] -.->|Routes to| Pod_BE
+        Svc_DB[🔌 Service: postgres-svc] -.->|Routes to| Pod_DB
 
-5 Pods
+        %% Workload Topology
+        CM_Inj & SEC_Inj --> Deploy_BE[🚀 Backend Deployment]
+        CM_Inj & SEC_Inj --> Deploy_DB[🚀 PostgreSQL Deployment]
+        
+        Deploy_FE[🚀 Frontend Deployment] -->|Spawns| Pod_FE(📦 5x Frontend Pods)
+        Deploy_BE -->|Spawns| Pod_BE(📦 2x Backend Pods)
+        Deploy_DB -->|Spawns| Pod_DB(📦 1x Database Pod)
 
-Backend
+    end
 
-Deployment
+    %% Class Application
+    class Devboard_NS ns;
+    class CM,SEC config;
+    class Deploy_FE,Deploy_BE,Deploy_DB deploy;
+    class Pod_FE,Pod_BE,Pod_DB pod;
+    class Svc_FE,Svc_BE,Svc_DB svc;
+```
 
-2 Pods
+---
 
-PostgreSQL
+### 📋 Resource Reference breakdown
 
-Deployment
+| Resource Component | Identifier Name | Injected Variables / Responsibilities |
+| :--- | :--- | :--- |
+| **☸️ Namespace** | `devboard` | Enforces the global structural isolation boundary for all application elements. |
+| **📄 ConfigMap** | `devboard-configmap` | Injects non-sensitive configuration keys like `POSTGRES_USER` directly into runtimes. |
+| **🔏 Secret** | `devboard-secrets` | Mounts base64 encrypted data entries: `POSTGRES_PASSWORD` and `POSTGRES_DB`. |
+| **🚀 Frontend Deployment** | `frontend-deployment` | Maintains exactly **5 replicas** running user-interface presentation instances. |
+| **🚀 Backend Deployment** | `backend-deployment` | Controls **2 replicas** executing calculations; consumes variables from configs and secrets. |
+| **🚀 PostgreSQL Deployment** | `postgres-deployment` | Anchors exactly **1 replica** running core state storage; relies on configuration maps. |
 
-1 Pod
+> 📌 **Architectural Reality:** Deployments manage the operational lifecycle of your Pods. Services expose consistent internal IP structures by mapping labels onto running pods. Actual application layer traffic flows over the **frontend → backend → database** network route, detailed next in Step 5.
 
-Deployments create Pods. Services route traffic to matching Pods. The
-backend and database consume configuration and credentials.
 
-The diagram above summarizes resource ownership and configuration.
-Actual application traffic follows the frontend → backend → database
-path, as shown in Step 5.
+
+
+
+
+
 
 ### 4.2 Which YAML field connects to which file?
 
