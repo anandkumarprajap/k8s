@@ -1004,6 +1004,57 @@ persistence, stronger Secret management, health probes, resource
 requests/limits, and appropriate network and access controls.
 
 
+# ☸️ K8s Cluster Application Orchestrator
+
+> A production-grade Kubernetes orchestration layer deploying highly resilient, self-healing microservice meshes with zero-downtime rolling updates.
+
+---
+
+## 🗺️ System Topology & Deployment Flow
+
+```mermaid
+graph TD
+    %% Define Node Colors and Styles
+    classDef cluster fill:#f9f9f9,stroke:#333,stroke-width:2px;
+    classDef pod fill:#e1f5fe,stroke:#0288d1,stroke-width:1px;
+    classDef net fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;
+    classDef data fill:#fff3e0,stroke:#ef6c00,stroke-width:1px;
+
+    %% CI/CD Flow
+    subgraph GitOps_Pipeline [🔄 GitHub Actions & ArgoCD]
+        Code[💻 Git Commit] -->|Triggers| CI[⚙️ CI Build & Test]
+        CI -->|Pushes Image| CR[🐳 Container Registry]
+        CR -->|Sync Manifest| Argo[🐙 ArgoCD Controller]
+    end
+
+    %% K8s Cluster Core Infrastructure
+    subgraph K8s_Cluster [☸️ Kubernetes Cluster Namespace]
+        Argo -->|Deploys| Ingress
+        
+        Ingress[🌐 Nginx Ingress Controller] -->|TLS Routing| Svc[🔌 K8s ClusterIP Service]
+        
+        subgraph Replica_Set [📦 Deployment Pod Mesh]
+            Svc -->|Load Balance| Pod1[📦 App Pod v2 - Active]
+            Svc -->|Rolling Update| Pod2[📦 App Pod v2 - Active]
+            Svc -.->|Terminating| PodOld[📦 App Pod v1 - Draining]
+        end
+
+        Pod1 -->|Mount| PVC[💾 Persistent Volume Claim]
+        Pod2 -->|Mount| PVC
+    end
+
+    %% State and Monitoring Layers
+    PVC -->|Read/Write| DB[(🛢️ Distributed State Store)]
+    Pod1 -.->|Telemetry Scrape| Prom[📊 Prometheus Monitor]
+    Pod2 -.->|Telemetry Scrape| Prom
+
+    %% Assign classes for styling
+    class K8s_Cluster cluster;
+    class Pod1,Pod2,PodOld pod;
+    class Ingress,Svc net;
+    class PVC,DB data;
+```
+
 
 # Explain 
 
